@@ -1,0 +1,23 @@
+//Problem 4: Add a layer of relationships that orders each client's transactions in time
+
+//link each client's transactions in time order.
+//MERGE means running it again won't create duplicates.
+MATCH (c:Client)-[:PERFORMED]->(t:Transaction)
+WITH c, t ORDER BY t.timestamp
+WITH c, collect(t) AS txs                 //each client's transactions, sorted by time
+WHERE size(txs) > 0
+WITH c, txs, head(txs) AS firstTx, last(txs) AS lastTx
+MERGE (c)-[:FIRST_TX]->(firstTx)          //link to earliest
+MERGE (c)-[:LAST_TX]->(lastTx)            //link to latest
+WITH c, txs
+UNWIND range(0, size(txs)-2) AS i         //for each transaction except the last
+WITH txs[i] AS a, txs[i+1] AS b
+MERGE (a)-[:NEXT]->(b);                    //link it to the next one in time
+
+
+//verify: show a few clients' chain lengths
+MATCH (c:Client)-[:FIRST_TX]->(f)
+OPTIONAL MATCH path = (f)-[:NEXT*]->(x)
+WITH c, count(DISTINCT x) + 1 AS chain_length
+RETURN c.name AS client, chain_length
+ORDER BY chain_length DESC LIMIT 5;

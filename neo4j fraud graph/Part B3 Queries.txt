@@ -1,0 +1,49 @@
+//Problem 3: "Pass-on" clients who receive a transfer then spend it at Woods (money-mule pattern)
+
+//set the seller name and lookback window  
+:param sellerName    => 'Woods';
+:param lookbackHours => 48;
+
+
+MATCH (c:Client)-[:PERFORMED]->(p:Purchase)-[:TO]->(:Seller {name: $sellerName})
+WHERE p.amount > 0
+//clients with >=2 Woods purchases, their total spend, and earliest purchase time
+WITH c, collect(p) AS purchases, sum(p.amount) AS total_purchase,
+     min(p.timestamp) AS first_purchase_time
+WHERE size(purchases) >= 2
+//for each Woods purchase, find transfers received before it within the window
+UNWIND purchases AS p
+MATCH (sender:Client)-[:PERFORMED]->(x:Transfer)-[:TO]->(c)
+WHERE x.amount > 0
+  AND sender <> c                                    //ignore self-funding
+  AND x.timestamp < p.timestamp                      //strictly before the purchase
+  AND x.timestamp >= p.timestamp - duration({hours: $lookbackHours})  //within lookback
+//collect the qualifying transfers (deduped by transfer id)
+WITH c, total_purchase, first_purchase_time,
+     collect(DISTINCT {tid: elementId(x), amt: x.amount, sender: sender.name}) AS qual
+WITH c, total_purchase, first_purchase_time,
+     reduce(s = 0.0, q IN qual | s + q.amt)          AS attributed_xfer,
+     size(apoc.coll.toSet([q IN qual | q.sender]))   AS n_senders,
+     qual
+WHERE attributed_xfer > 0
+//what % of their Woods spend could have come from the received transfers
+WITH c, total_purchase, first_purchase_time, attributed_xfer, n_senders, qual,
+     (total_purchase / attributed_xfer) * 100 AS percentage
+WHERE percentage >= 5
+//find which sender contributed the most
+WITH c, percentage, attributed_xfer, total_purchase, first_purchase_time, n_senders,
+     [snd IN apoc.coll.toSet([q IN qual | q.sender]) |
+        {sender: snd,
+         amt: reduce(s = 0.0, q IN [z IN qual WHERE z.sender = snd] | s + q.amt)}] AS bySender
+WITH c, percentage, attributed_xfer, total_purchase, first_purchase_time, n_senders,
+     reduce(best = {sender: null, amt: -1.0}, m IN bySender |
+            CASE WHEN m.amt > best.amt THEN m ELSE best END) AS top
+RETURN c.name              AS name,
+       round(percentage, 2)      AS percentage,
+       round(attributed_xfer, 2) AS attributed_xfer,
+       round(total_purchase, 2)  AS total_purchase,
+       first_purchase_time,
+       n_senders,
+       top.sender          AS top_sender,
+       round(top.amt, 2)   AS top_sender_amount
+ORDER BY percentage DESC;

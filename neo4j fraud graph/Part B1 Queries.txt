@@ -1,0 +1,40 @@
+//Problem 1: Which clients spent the most on purchases between 10:00-14:00 on 12 May 2024
+
+//set the start and end time first 
+:param start => datetime('2024-05-12T10:00:00');
+:param end   => datetime('2024-05-12T14:00:00');
+
+MATCH (c:Client)-[:PERFORMED]->(t:Purchase)-[:TO]->(s:Seller)
+WHERE t.timestamp >= $start AND t.timestamp <= $end AND t.amount > 0
+//total each client's spend per store (to find their top store)
+WITH c, s,
+     sum(t.amount)    AS store_spend,
+     count(t)         AS store_cnt,
+     min(t.timestamp) AS store_first,
+     max(t.timestamp) AS store_last
+//roll up to one row per client
+WITH c,
+     sum(store_spend) AS total_in_window,
+     sum(store_cnt)   AS txn_count,
+     min(store_first) AS first_txn_time,
+     max(store_last)  AS last_txn_time,
+     collect({store: s.name, spend: store_spend}) AS stores
+//pick the store they spent the most at
+WITH c, total_in_window, txn_count, first_txn_time, last_txn_time,
+     reduce(best = {store:null, spend:-1.0}, x IN stores |
+            CASE WHEN x.spend > best.spend THEN x ELSE best END) AS top
+//gather all clients so I can rank them
+WITH collect({name:c.name, total_in_window:total_in_window, txn_count:txn_count,
+              first_txn_time:first_txn_time, last_txn_time:last_txn_time,
+              top_store:top.store, top_store_spend:top.spend}) AS rows
+UNWIND rows AS r
+WITH rows, r
+//dense rank: count distinct higher totals + 1 (ties share a rank)
+WITH r,
+     size([v IN apoc.coll.toSet([x IN rows | x.total_in_window])
+           WHERE v > r.total_in_window]) + 1 AS rank
+RETURN r.name AS name, r.total_in_window AS total_in_window, r.txn_count AS txn_count,
+       r.first_txn_time AS first_txn_time, r.last_txn_time AS last_txn_time,
+       r.top_store AS top_store, round(r.top_store_spend,2) AS top_store_spend, rank
+ORDER BY total_in_window DESC
+LIMIT 20;

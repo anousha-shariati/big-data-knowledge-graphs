@@ -1,0 +1,62 @@
+//Problem 1: find clusters of clients linked by shared email/phone/TFN
+
+//STEP 1: drop the projection if it already exists 
+CALL gds.graph.exists('idGraph') YIELD exists
+WITH exists WHERE exists
+CALL gds.graph.drop('idGraph') YIELD graphName
+RETURN graphName;
+
+//STEP 2: project Clients + identifier nodes, with the HAS_ relationships.
+//undirected so "shares an identifier" works both ways.
+CALL gds.graph.project(
+  'idGraph',
+  ['Client', 'Email', 'Phone', 'TFN'],
+  {
+    HAS_EMAIL: { orientation: 'UNDIRECTED' },
+    HAS_PHONE: { orientation: 'UNDIRECTED' },
+    HAS_TFN:   { orientation: 'UNDIRECTED' }
+  }
+) YIELD graphName, nodeCount, relationshipCount
+RETURN graphName, nodeCount, relationshipCount;
+
+//STEP 3 - ALGORITHM 1: Weakly Connected Components.
+//groups clients that are connected through any chain of shared identifiers.
+CALL gds.wcc.stream('idGraph')
+YIELD nodeId, componentId
+WITH gds.util.asNode(nodeId) AS n, componentId
+WHERE n:Client
+WITH componentId, collect(n.name) AS members, count(*) AS sz
+WHERE sz >= 5
+RETURN componentId, sz AS size, members
+ORDER BY size DESC;
+
+//STEP 4 - ALGORITHM 2: Louvain (for comparison).
+//optimises "modularity" and can split large blobs into tighter groups.
+CALL gds.louvain.stream('idGraph')
+YIELD nodeId, communityId
+WITH gds.util.asNode(nodeId) AS n, communityId
+WHERE n:Client
+WITH communityId, collect(n.name) AS members, count(*) AS sz
+WHERE sz >= 5
+RETURN communityId, sz AS size, members
+ORDER BY size DESC;
+
+//STEP 5: write back fraud_group_id + method + size for groups of 5+ (using WCC)
+CALL gds.wcc.stream('idGraph')
+YIELD nodeId, componentId
+WITH gds.util.asNode(nodeId) AS n, componentId
+WHERE n:Client
+WITH componentId, collect(n) AS members
+WHERE size(members) >= 5
+UNWIND members AS m
+SET m.fraud_group_id = componentId,
+    m.fraud_group_method = 'WCC',
+    m.fraud_group_size = size(members)
+RETURN count(DISTINCT componentId) AS groups_written, count(m) AS clients_written;
+
+//STEP 6: visualise the LARGEST group - its clients and shared identifiers
+MATCH (c:Client) WHERE c.fraud_group_id IS NOT NULL
+WITH c.fraud_group_id AS gid, count(*) AS sz ORDER BY sz DESC LIMIT 1
+MATCH (c:Client {fraud_group_id: gid})
+OPTIONAL MATCH (c)-[r:HAS_EMAIL|HAS_PHONE|HAS_TFN]->(idn)
+RETURN c, r, idn;

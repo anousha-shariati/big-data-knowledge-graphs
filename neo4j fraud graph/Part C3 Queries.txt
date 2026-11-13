@@ -1,0 +1,44 @@
+//Problem 3: predict hidden links between clients who likely collaborate but don't transact directly
+
+//drop old projection if present
+CALL gds.graph.exists('simGraph') YIELD exists
+WITH exists WHERE exists
+CALL gds.graph.drop('simGraph') YIELD graphName
+RETURN graphName;
+
+//project all clients with weighted transfer edges (amount kept as the weight)
+CALL gds.graph.project.cypher(
+  'simGraph',
+  'MATCH (c:Client) RETURN id(c) AS id',
+  'MATCH (a:Client)-[:PERFORMED]->(t:Transfer)-[:TO]->(b:Client)
+   WHERE t.amount > 0
+   RETURN id(a) AS source, id(b) AS target, sum(t.amount) AS weight'
+) YIELD graphName, nodeCount, relationshipCount
+RETURN graphName, nodeCount, relationshipCount;
+
+//Node Similarity compares who each client transacts with.
+//high similarity + NO direct transfer between them = a likely hidden connection.
+CALL gds.nodeSimilarity.stream('simGraph', { topK: 5 })
+YIELD node1, node2, similarity
+WITH gds.util.asNode(node1) AS a, gds.util.asNode(node2) AS b, similarity
+//keep only pairs that do NOT already transfer directly to each other
+WHERE NOT (a)-[:PERFORMED]->(:Transfer)-[:TO]->(b)
+  AND NOT (b)-[:PERFORMED]->(:Transfer)-[:TO]->(a)
+  AND a.id < b.id
+RETURN a.name AS client_a, b.name AS client_b, round(similarity,4) AS similarity,
+       a.fraud_group_id AS group_a, b.fraud_group_id AS group_b
+ORDER BY similarity DESC
+LIMIT 5;
+
+//timeline visualisation source: transfers with their timestamps
+MATCH (a:Client)-[:PERFORMED]->(t:Transfer)-[:TO]->(b:Client)
+WHERE t.amount > 0
+RETURN a.name AS from_client, b.name AS to_client,
+       t.timestamp AS when, t.amount AS amount
+ORDER BY when
+LIMIT 500;
+
+MATCH (a:Client)-[:PERFORMED]->(t:Transfer)-[:TO]->(b:Client)
+WHERE t.amount > 0
+RETURN a, t, b
+LIMIT 100;

@@ -1,0 +1,24 @@
+//Problem 2: Top 5 clients with the largest negative cashflow (they send/spend more than they receive)
+
+MATCH (c:Client)
+//everything the client sent out (purchases + transfers sent)
+OPTIONAL MATCH (c)-[:PERFORMED]->(out:Transaction)
+WITH c, collect(out) AS outs
+//transfers the client received
+OPTIONAL MATCH (inx:Transfer)-[:TO]->(c)
+WITH c, outs, collect(inx) AS ins
+WITH c,
+     reduce(s=0.0, t IN outs | s + t.amount) AS total_outgoing,
+     reduce(s=0.0, t IN ins  | s + t.amount) AS total_incoming,
+     size(outs) + size(ins)                  AS txn_count,
+     //their single biggest outgoing transaction
+     reduce(m=0.0, t IN outs | CASE WHEN t.amount > m THEN t.amount ELSE m END) AS max_outgoing
+WITH c, total_outgoing, total_incoming, txn_count, max_outgoing,
+     (total_incoming - total_outgoing) AS balance
+//keep only clients who send out more than they take in
+WHERE total_outgoing > total_incoming
+RETURN c.name AS name, round(balance,2) AS balance, round(max_outgoing,2) AS max_outgoing,
+       round(total_outgoing,2) AS total_outgoing, round(total_incoming,2) AS total_incoming,
+       txn_count
+ORDER BY balance ASC
+LIMIT 5;

@@ -1,0 +1,65 @@
+//Problem 2: trace money leaving the fraud groups and find the key routing accounts
+
+//PART A: cross-boundary transfers - sender inside a fraud group, recipient outside.
+MATCH (src:Client)-[:PERFORMED]->(t:Transfer)-[:TO]->(dst:Client)
+WHERE src.fraud_group_id IS NOT NULL
+  AND dst.fraud_group_id IS NULL
+  AND t.amount > 0
+WITH dst, sum(t.amount) AS total_incoming, count(t) AS n_txns,
+     collect(DISTINCT src.fraud_group_id) AS from_groups
+RETURN dst.name AS recipient, round(total_incoming,2) AS total_incoming,
+       n_txns, from_groups
+ORDER BY total_incoming DESC
+LIMIT 10;
+
+//PART B: mark the boundary accounts (group members + the outsiders they pay)
+MATCH (src:Client)-[:PERFORMED]->(t:Transfer)-[:TO]->(dst:Client)
+WHERE src.fraud_group_id IS NOT NULL AND dst.fraud_group_id IS NULL AND t.amount > 0
+SET dst.boundary = true;
+MATCH (c:Client) WHERE c.fraud_group_id IS NOT NULL SET c.boundary = true;
+
+//drop old projection if present
+CALL gds.graph.exists('boundaryGraph') YIELD exists
+WITH exists WHERE exists
+CALL gds.graph.drop('boundaryGraph') YIELD graphName
+RETURN graphName;
+
+//project just the boundary accounts, with weighted transfer edges between them
+CALL gds.graph.project.cypher(
+  'boundaryGraph',
+  'MATCH (c:Client) WHERE c.boundary = true RETURN id(c) AS id',
+  'MATCH (a:Client)-[:PERFORMED]->(t:Transfer)-[:TO]->(b:Client)
+   WHERE a.boundary = true AND b.boundary = true AND t.amount > 0
+   RETURN id(a) AS source, id(b) AS target, sum(t.amount) AS weight'
+) YIELD graphName, nodeCount, relationshipCount
+RETURN graphName, nodeCount, relationshipCount;
+
+//cluster the boundary subgraph to find tightly connected funnels
+CALL gds.louvain.stream('boundaryGraph')
+YIELD nodeId, communityId
+WITH gds.util.asNode(nodeId) AS n, communityId
+WITH communityId, collect(n.name) AS members, count(*) AS sz
+RETURN communityId, sz AS size, members
+ORDER BY size DESC
+LIMIT 10;
+
+//PART C - CENTRALITY 1: PageRank (weighted) - who receives from many well-connected accounts
+CALL gds.pageRank.stream('boundaryGraph', { relationshipWeightProperty: 'weight' })
+YIELD nodeId, score
+WITH gds.util.asNode(nodeId) AS n, score
+RETURN n.name AS client, round(score,4) AS pagerank
+ORDER BY pagerank DESC
+LIMIT 10;
+
+//CENTRALITY 2: Betweenness - who sits on the most paths (the routers/middlemen)
+CALL gds.betweenness.stream('boundaryGraph')
+YIELD nodeId, score
+WITH gds.util.asNode(nodeId) AS n, score
+RETURN n.name AS client, round(score,4) AS betweenness
+ORDER BY betweenness DESC
+LIMIT 10;
+
+//PART D: visualisation - the boundary transfers
+MATCH (a:Client {boundary:true})-[:PERFORMED]->(t:Transfer)-[:TO]->(b:Client {boundary:true})
+WHERE t.amount > 0
+RETURN a, t, b LIMIT 300;

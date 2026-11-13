@@ -1,0 +1,107 @@
+//Block 0: Constraints and indexes
+
+CREATE CONSTRAINT client_id IF NOT EXISTS FOR (c:Client) REQUIRE c.id IS UNIQUE;
+CREATE CONSTRAINT seller_id IF NOT EXISTS FOR (s:Seller) REQUIRE s.id IS UNIQUE;
+CREATE CONSTRAINT tfn_val   IF NOT EXISTS FOR (t:TFN)    REQUIRE t.value IS UNIQUE;
+CREATE CONSTRAINT phone_val IF NOT EXISTS FOR (p:Phone)  REQUIRE p.value IS UNIQUE;
+CREATE CONSTRAINT email_val IF NOT EXISTS FOR (e:Email)  REQUIRE e.value IS UNIQUE;
+CREATE CONSTRAINT source_name IF NOT EXISTS FOR (src:Source) REQUIRE src.name IS UNIQUE;
+CREATE INDEX txn_time IF NOT EXISTS FOR (t:Transaction) ON (t.timestamp);
+CREATE INDEX txn_date IF NOT EXISTS FOR (t:Transaction) ON (t.date);
+
+//Block 1: Source (provenance) nodes
+
+MERGE (:Source {name: 'clients.csv'});
+MERGE (:Source {name: 'stores.csv'});
+MERGE (:Source {name: 'purchase.csv'});
+MERGE (:Source {name: 'xfer.csv'});
+
+//Block 2: Clients + identifier nodes
+
+LOAD CSV WITH HEADERS FROM 'file:///clients.csv' AS row
+MERGE (c:Client {id: row.id})
+  SET c.name = row.name, c.flagged = (row.flagged = 'true')
+MERGE (e:Email {value: row.email})
+MERGE (p:Phone {value: row.phone})
+MERGE (t:TFN   {value: row.tfn})
+MERGE (c)-[:HAS_EMAIL]->(e)
+MERGE (c)-[:HAS_PHONE]->(p)
+MERGE (c)-[:HAS_TFN]->(t);
+
+//Block 3: Sellers
+
+LOAD CSV WITH HEADERS FROM 'file:///stores.csv' AS row
+MERGE (s:Seller {id: row.id}) SET s.name = row.name;
+
+//Block 4: Purchases
+
+:auto LOAD CSV WITH HEADERS FROM 'file:///purchase.csv' AS row
+CALL {
+  WITH row
+  MATCH (c:Client {id: row.idFrom})
+  MATCH (s:Seller {id: row.idTo})
+  MATCH (src:Source {name: 'purchase.csv'})
+  WITH row, c, s, src,
+       datetime('2024-04-01T00:00:00') + duration({minutes: toInteger(row.timeOffset)}) AS ts
+  CREATE (t:Transaction:Purchase {
+      amount: toFloat(row.amount), timeOffset: toInteger(row.timeOffset),
+      timestamp: ts, date: date(ts), hour: ts.hour, weekday: ts.dayOfWeek,
+      is_weekend: (ts.dayOfWeek >= 6), is_business_hours: (ts.hour >= 9 AND ts.hour < 17)
+  })
+  CREATE (c)-[:PERFORMED]->(t)
+  CREATE (t)-[:TO]->(s)
+  CREATE (t)-[:FROM_SOURCE]->(src)
+} IN TRANSACTIONS OF 5000 ROWS;
+
+//Block 5: Transfers
+
+:auto LOAD CSV WITH HEADERS FROM 'file:///xfer.csv' AS row
+CALL {
+  WITH row
+  MATCH (a:Client {id: row.idFrom})
+  MATCH (b:Client {id: row.idTo})
+  MATCH (src:Source {name: 'xfer.csv'})
+  WITH row, a, b, src,
+       datetime('2024-04-01T00:00:00') + duration({minutes: toInteger(row.timeOffset)}) AS ts
+  CREATE (t:Transaction:Transfer {
+      amount: toFloat(row.amount), timeOffset: toInteger(row.timeOffset),
+      timestamp: ts, date: date(ts), hour: ts.hour, weekday: ts.dayOfWeek,
+      is_weekend: (ts.dayOfWeek >= 6), is_business_hours: (ts.hour >= 9 AND ts.hour < 17)
+  })
+  CREATE (a)-[:PERFORMED]->(t)
+  CREATE (t)-[:TO]->(b)
+  CREATE (t)-[:FROM_SOURCE]->(src)
+} IN TRANSACTIONS OF 5000 ROWS;
+
+//Extension 1: Temporal ordering (NEXT / FIRST_TX / LAST_TX)
+
+MATCH (c:Client)-[:PERFORMED]->(t:Transaction)
+WITH c, t ORDER BY t.timestamp
+WITH c, collect(t) AS txs
+WHERE size(txs) > 0
+WITH c, txs, head(txs) AS firstTx, last(txs) AS lastTx
+CREATE (c)-[:FIRST_TX]->(firstTx)
+CREATE (c)-[:LAST_TX]->(lastTx)
+WITH c, txs
+UNWIND range(0, size(txs)-2) AS i
+WITH txs[i] AS a, txs[i+1] AS b
+CREATE (a)-[:NEXT]->(b);
+
+//Extension 2: Shared identifiers (SHARED_IDENTIFIER)
+
+MATCH (a:Client)-[:HAS_EMAIL|HAS_PHONE|HAS_TFN]->(x)<-[:HAS_EMAIL|HAS_PHONE|HAS_TFN]-(b:Client)
+WHERE a.id < b.id
+WITH a, b, collect(DISTINCT labels(x)[0]) AS shared_types, count(DISTINCT x) AS shared_count
+MERGE (a)-[r:SHARED_IDENTIFIER]->(b)
+  SET r.types = shared_types, r.weight = shared_count;
+
+//Query-plan comparison
+
+PROFILE MATCH (c:Client {id: '4970578288198743'}) RETURN c.name;
+PROFILE MATCH (c:Client) WHERE c.name = 'Savannah Poole' RETURN c.id;
+
+//Validation
+
+MATCH (n) RETURN labels(n) AS label, count(*) AS cnt ORDER BY cnt DESC;
+MATCH (t:Purchase) WHERE t.date = date('2024-05-12') RETURN count(*) AS purchases_on_12_may;
+
